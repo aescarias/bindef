@@ -1,6 +1,6 @@
 = The BinDef Language Reference
 Ángel Carias <lotta.dev@outlook.com>
-v0.5, 2025-12-16
+v0.6, 2025-12-17
 :toc: auto
 :sectnums: |,all|
 
@@ -522,8 +522,6 @@ NOTE: The `types` key was added in version 0.4
 
 === The `meta` key
 
-NOTE: Before BinDef 0.5, the keys `mime` and `exts` were required.
-
 `meta` is a mapping containing metadata of the format being described. The keys that the `meta` mapping may contain are:
 
 [cols="1,1,2"]
@@ -540,15 +538,19 @@ NOTE: Before BinDef 0.5, the keys `mime` and `exts` were required.
 
 |mime
 |list of strings
-|(optional) The media or MIME types assigned to the described format. If multiple are listed, they should be listed in descending order of preference.
+|(required before 0.5; optional since) The media or MIME types assigned to the described format. If multiple are listed, they should be listed in descending order of preference.
 
 |exts
 |list of strings
-|(optional) The file extensions commonly used for this format. If multiple are listed, they should be listed in descending order of preference. The extensions should contain a leading period.
+|(required before 0.5; optional since) The file extensions commonly used for this format. If multiple are listed, they should be listed in descending order of preference. The extensions should contain a leading period.
 
 |doc
 |string
 |(optional) Details regarding the described format. The information that goes here is up to the author, but generally, it should describe the format's purpose, creator(s), and basic structure, and contain links to technical references or specifications.
+
+|endian
+|string
+|(optional; added in 0.6) The byte endianness of the described format. If specified, must be exactly either "little" or "big".
 |====
 
 === The `binary` key
@@ -740,7 +742,9 @@ NOTE: uint24 and int24 were added in version 0.4
 
 The types `uint8`, `uint16`, `uint24`, `uint32`, and `uint64` are used for parsing unsigned integers with those bit sizes. Their signed equivalents are `int8`, `int16`, `int24`, `int32`, and `int64`.
 
-These types must contain an `endian` key specifying either the string "little" or the string "big". This tells BinDef to read the integer in little endian or big endian byte order, respectively. An exception is made for `int8` and `uint8` where specifying a byte endianness is redundant.
+Integer types must include an `endian` key specifying either the string "little" or the string "big" exactly. This tells the runtime to read the integer in little endian or big endian byte order, respectively. An exception is made for `int8` and `uint8` where specifying a byte endianness is redundant.
+
+The `endian` key may be specified directly in the field declaration or may be inherited from a parent structure that contains the `endian` key, which may either be the structure storing the field or the `endian` key specified in the `meta` mapping of the document.
 
 === Floating point types
 

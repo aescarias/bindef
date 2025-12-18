@@ -17,7 +17,7 @@ import (
 )
 
 // SpecVersion is the version of the BinDef spec implemented by this runtime.
-var SpecVersion = Version{Major: 0, Minor: 5}
+var SpecVersion = Version{Major: 0, Minor: 6}
 
 // A Version describes a specification version with a major and minor version component.
 type Version struct {
@@ -48,6 +48,18 @@ func NewVersionFromString(version string) (Version, error) {
 	return Version{Major: major, Minor: minor}, nil
 }
 
+// Endian describes the endianness of the file format.
+type Endian string
+
+const (
+	EndianLittle Endian = "little"
+	EndianBig    Endian = "big"
+)
+
+func (e Endian) IsValid() bool {
+	return e == EndianLittle || e == EndianBig
+}
+
 // Meta describes the metadata of a BinDef document.
 type Meta struct {
 	Version Version  // The minimum BDF version this document supports.
@@ -55,6 +67,7 @@ type Meta struct {
 	Mime    []string // The media or MIME type(s) for this format.
 	Exts    []string // The file extensions used by this format.
 	Doc     string   // Additional documentation for the format.
+	Endian  Endian   // Endianness of the file format.
 }
 
 type SeekPos struct {
@@ -72,8 +85,7 @@ type FormatType struct {
 	Valid        LazyResult   // Validation function.
 	Magic        LazyResult   // Magic assertion.
 	If           LazyResult   // Only process value on condition.
-	Endian       string       // For integer types and types that may contain them, the byte endianness (either "big" or "little").
-	Match        []MagicTag   // For magic types only, the pattern(s) that must match.
+	Endian       Endian       // For integer types and types that may contain them, the byte endianness (either "big" or "little").
 	Size         int64        // For byte types only, the size of the byte string.
 	Strip        bool         // For byte types only, whether to strip whitespace or null bytes from the ends of the string.
 	RawFields    []MapResult  // For structures only, the fields contained in the struct.
@@ -93,11 +105,6 @@ type EnumMember struct {
 	Value Result // The value of the enum constant.
 	Name  string // Human-readable enum constant name.
 	Doc   string // Details about the enum constant.
-}
-
-type MagicTag struct {
-	Contents string
-	Offset   int64
 }
 
 func parseMeta(meta Result) (Meta, error) {
@@ -163,36 +170,61 @@ func parseMeta(meta Result) (Meta, error) {
 		extStrings[idx] = string(itemStr)
 	}
 
+	// endian
+	endianStr, err := GetKeyByIdent[StringResult](metadata, "endian", false)
+	if err != nil {
+		return Meta{}, err
+	}
+
+	endian := Endian(endianStr)
+	if !endian.IsValid() && endian != "" {
+		return Meta{}, fmt.Errorf("meta: endian must be either 'little' or 'big', not %q", endian)
+	}
+
 	return Meta{
 		Version: version,
 		Name:    string(name),
 		Mime:    mimeStrings,
 		Exts:    extStrings,
 		Doc:     string(doc),
+		Endian:  endian,
 	}, nil
 }
 
-func getFormatEndian(bin MapResult, base MapResult, ns Namespace) (string, error) {
-	var endian string
+func getFormatEndian(bin MapResult, context *Context, ns Namespace) (Endian, error) {
+	var endian Endian
 	endianRes, err := GetEvalKeyByIdent[StringResult](bin, "endian", false, ns)
 	if err != nil {
 		return "", err
 	}
 
-	if endianRes == "" {
-		baseEndianRes, err := GetEvalKeyByIdent[StringResult](base, "endian", true, ns)
+	if context != nil && endianRes == "" {
+		baseEndianRes, err := GetEvalKeyByIdent[StringResult](context.ParentMap, "endian", false, ns)
 		if err != nil {
 			return "", err
 		}
 
-		endian = string(baseEndianRes)
+		if baseEndianRes == "" {
+			if context.GlobalEndian.IsValid() {
+				endian = context.GlobalEndian
+			} else {
+				endian = ""
+			}
+		} else {
+			endian = Endian(baseEndianRes)
+		}
+	} else if context != nil {
+		endian = Endian(endianRes)
 	} else {
-		endian = string(endianRes)
+		endian = ""
 	}
 
-	endian = strings.ToLower(endian)
-	if endian != "little" && endian != "big" {
-		return "", fmt.Errorf("endian is not 'little' or 'big'")
+	if endian == "" {
+		return "", fmt.Errorf("endian must be specified in this context")
+	}
+
+	if !endian.IsValid() {
+		return "", fmt.Errorf("endian must be either 'little' or 'big', not %q", endian)
 	}
 
 	return endian, nil
@@ -269,7 +301,12 @@ func processSwitch(format MapResult, ns Namespace) (SwitchStmt, error) {
 
 var ErrSkipped = fmt.Errorf("format type was skipped because condition is false")
 
-func ParseFormatType(format Result, ns Namespace, base MapResult) (FormatType, error) {
+type Context struct {
+	ParentMap    MapResult
+	GlobalEndian Endian
+}
+
+func ParseFormatType(format Result, ns Namespace, context *Context) (FormatType, error) {
 	bin, err := ResultIs[MapResult](format)
 	if err != nil {
 		return FormatType{}, err
@@ -328,7 +365,7 @@ func ParseFormatType(format Result, ns Namespace, base MapResult) (FormatType, e
 
 		switch tempRes.Kind() {
 		case ResultMap:
-			tempInherited, err := ParseFormatType(tempRes, ns, nil)
+			tempInherited, err := ParseFormatType(tempRes, ns, context)
 			if err != nil {
 				return FormatType{}, err
 			}
@@ -467,7 +504,7 @@ func ParseFormatType(format Result, ns Namespace, base MapResult) (FormatType, e
 
 	switch baseFormat.Type {
 	case TypeUint16, TypeUint24, TypeUint32, TypeUint64, TypeInt16, TypeInt24, TypeInt32, TypeInt64, TypeFloat32, TypeFloat64:
-		endian, err := getFormatEndian(bin, base, ns)
+		endian, err := getFormatEndian(bin, context, ns)
 		if err != nil {
 			return FormatType{}, err
 		}
@@ -578,7 +615,7 @@ func ParseFormatType(format Result, ns Namespace, base MapResult) (FormatType, e
 			return FormatType{}, err
 		}
 
-		endian, err := getFormatEndian(bin, base, ns)
+		endian, err := getFormatEndian(bin, context, ns)
 		if err != nil {
 			return FormatType{}, err
 		}
@@ -615,7 +652,7 @@ func ParseFormatType(format Result, ns Namespace, base MapResult) (FormatType, e
 		}
 
 		if enumType.Name != TypeUint8 && enumType.Name != TypeInt8 {
-			endian, err := getFormatEndian(bin, base, ns)
+			endian, err := getFormatEndian(bin, context, ns)
 			if err != nil {
 				return FormatType{}, err
 			}
@@ -812,7 +849,7 @@ func valueInEnumRange(from, to IntegerResult, value Result) (bool, error) {
 	return isEnumerated, nil
 }
 
-func processType(handle *os.File, format *FormatType, ns Namespace) (res Result, err error) {
+func processType(handle *os.File, format *FormatType, ns Namespace, globalEndian Endian) (res Result, err error) {
 	if format.At != nil {
 		if _, err := handle.Seek(format.At.Offset, format.At.Whence); err != nil {
 			return nil, err
@@ -871,7 +908,7 @@ func processType(handle *os.File, format *FormatType, ns Namespace) (res Result,
 			value = StringResult(byteSlice)
 		}
 	case TypeEnum:
-		result, err := processType(handle, &FormatType{Type: format.EnumType, Endian: format.Endian}, ns)
+		result, err := processType(handle, &FormatType{Type: format.EnumType, Endian: format.Endian}, ns, globalEndian)
 		if err != nil {
 			return nil, err
 		}
@@ -919,7 +956,7 @@ func processType(handle *os.File, format *FormatType, ns Namespace) (res Result,
 
 		format.ProcFields = []FormatType{}
 		for _, field := range format.RawFields {
-			fieldFormat, err := ParseFormatType(field, currentNs, inherited)
+			fieldFormat, err := ParseFormatType(field, currentNs, &Context{ParentMap: inherited, GlobalEndian: globalEndian})
 			if err != nil {
 				if errors.Is(err, ErrSkipped) {
 					continue
@@ -927,7 +964,7 @@ func processType(handle *os.File, format *FormatType, ns Namespace) (res Result,
 				return nil, err
 			}
 
-			res, err := processType(handle, &fieldFormat, currentNs)
+			res, err := processType(handle, &fieldFormat, currentNs, globalEndian)
 			if err != nil {
 				return nil, err
 			}
@@ -964,12 +1001,12 @@ func processType(handle *os.File, format *FormatType, ns Namespace) (res Result,
 				}
 			}
 
-			arrItem, err := ParseFormatType(format.RawArrItem, ns, nil)
+			arrItem, err := ParseFormatType(format.RawArrItem, ns, &Context{GlobalEndian: globalEndian})
 			if err != nil {
 				return nil, err
 			}
 
-			proc, err := processType(handle, &arrItem, ns)
+			proc, err := processType(handle, &arrItem, ns, globalEndian)
 			if err != nil {
 				if format.ArrSizeIsEos && errors.Is(err, io.EOF) {
 					break
@@ -1041,6 +1078,13 @@ func processType(handle *os.File, format *FormatType, ns Namespace) (res Result,
 func ApplyBDF(document Result, targetFile string) ([]MetaPair, error) {
 	contents := []MetaPair{}
 
+	meta, err := GetMetadata(document)
+	if err != nil {
+		return nil, fmt.Errorf("meta: %w", err)
+	}
+
+	globalEndian := meta.Endian
+
 	root, err := ResultIs[MapResult](document)
 	if err != nil {
 		return nil, fmt.Errorf("root: %w", err)
@@ -1081,7 +1125,7 @@ func ApplyBDF(document Result, targetFile string) ([]MetaPair, error) {
 	}
 
 	for idx, res := range binarySeq {
-		formatType, err := ParseFormatType(res, ns, nil)
+		formatType, err := ParseFormatType(res, ns, &Context{GlobalEndian: globalEndian})
 		if err != nil {
 			if errors.Is(err, ErrSkipped) {
 				continue
@@ -1089,7 +1133,7 @@ func ApplyBDF(document Result, targetFile string) ([]MetaPair, error) {
 			return nil, fmt.Errorf("binary[%d]: %w", idx, err)
 		}
 
-		value, err := processType(handle, &formatType, ns)
+		value, err := processType(handle, &formatType, ns, globalEndian)
 		if err != nil {
 			if err, ok := err.(ErrMagic); ok {
 				return nil, err
