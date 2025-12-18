@@ -177,8 +177,8 @@ func ShowMetadataField(pair MetaPair, indent int, fullBytes bool) {
 			}
 
 			if found {
-				if member.Doc != "" {
-					friendlyName = member.Doc
+				if member.Name != "" {
+					friendlyName = member.Name
 				} else {
 					friendlyName = member.Id
 				}
